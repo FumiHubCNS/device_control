@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 
+from device_control.protocol import decode_escape_sequences
+
 from .driver import Afg1062
 
 
@@ -18,9 +20,11 @@ def _bool_value(value: str) -> bool:
 
 def _add_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--resource", help="VISA resource, e.g. USB0::...::INSTR")
+    parser.add_argument("--usbtmc", help="Linux USB-TMC device, e.g. /dev/usbtmc0")
     parser.add_argument("--ip", help="Instrument IP for TCPIP0::<ip>::INSTR")
     parser.add_argument("--backend", default="@py", help="pyvisa ResourceManager backend")
     parser.add_argument("--timeout-ms", type=int, default=10000)
+    parser.add_argument("--write-termination", default="\n", help="SCPI write termination")
     parser.add_argument("--verbose", action="store_true")
 
 
@@ -51,13 +55,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _open(args: argparse.Namespace) -> Afg1062:
-    if args.resource is None and args.ip is None:
-        raise ValueError("Provide --resource for USB-TMC or --ip for TCP/IP")
+    if args.resource is None and args.usbtmc is None and args.ip is None:
+        raise ValueError("Provide --resource for VISA, --usbtmc for Linux USB-TMC, or --ip for TCP/IP")
     afg = Afg1062(
         resource=args.resource,
+        usbtmc=args.usbtmc,
         ip=args.ip,
         backend=args.backend,
         timeout_ms=args.timeout_ms,
+        write_termination=decode_escape_sequences(args.write_termination),
         verbose=args.verbose,
     )
     afg.connect()

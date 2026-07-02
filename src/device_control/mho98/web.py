@@ -20,7 +20,7 @@ from .storage import ScopeHDF5Writer
 class ConnectRequest(BaseModel):
     ip: str = "172.16.206.60"
     backend: str = "@py"
-    timeout_ms: int = Field(default=10000, ge=1000, le=120000)
+    timeout_ms: int = Field(default=60000, ge=1000, le=120000)
 
 
 class SetupRequest(BaseModel):
@@ -75,6 +75,8 @@ def _html(default_ip: str) -> str:
         <input id="ip" value="{default_ip}" />
         <label for="backend">VISA backend</label>
         <input id="backend" value="@py" />
+        <label for="connectTimeoutMs">VISA timeout [ms]</label>
+        <input id="connectTimeoutMs" type="number" min="1000" max="120000" step="1000" value="60000" />
         <button class="primary" onclick="connectScope()">Connect</button>
         <button onclick="disconnectScope()">Disconnect</button>
       </div>
@@ -157,6 +159,7 @@ async function connectScope() {
     const data = await postJSON("/api/connect", {
       ip: document.getElementById("ip").value,
       backend: document.getElementById("backend").value,
+      timeout_ms: Number(document.getElementById("connectTimeoutMs").value),
     });
     setStatus(data);
   } catch (err) {

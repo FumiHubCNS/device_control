@@ -80,6 +80,21 @@ def _html() -> str:
     script = """
 let ws;
 let heartbeat;
+let statusPoll;
+
+const basePath = location.pathname.endsWith("/")
+  ? location.pathname
+  : location.pathname.replace(/[^/]*$/, "");
+
+function appPath(path) {
+  return `${basePath}${path.replace(/^[/]+/, "")}`;
+}
+
+function wsPath(path) {
+  const url = new URL(appPath(path), location.href);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return url.href;
+}
 
 function fmt(x, digits = 3) {
   if (x === null || x === undefined) return "---";
@@ -98,14 +113,15 @@ function updateUI(data) {
 }
 
 function connectWS() {
-  const scheme = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${scheme}://${location.host}/ws`);
+  ws = new WebSocket(wsPath("ws"));
 
   ws.onopen = () => {
     const status = document.getElementById("wsStatus");
     status.textContent = "connected";
     status.className = "ok";
     clearInterval(heartbeat);
+    clearInterval(statusPoll);
+    statusPoll = null;
     heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send("ping");
     }, 1000);
@@ -117,6 +133,7 @@ function connectWS() {
     status.textContent = "disconnected";
     status.className = "ng";
     clearInterval(heartbeat);
+    statusPoll = statusPoll || setInterval(refreshStatus, 1000);
     setTimeout(connectWS, 1000);
   };
 }
@@ -134,18 +151,27 @@ async function postJSON(url, body) {
   updateUI(await res.json());
 }
 
+async function refreshStatus() {
+  try {
+    const res = await fetch(appPath("api/status"), {cache: "no-store"});
+    if (res.ok) updateUI(await res.json());
+  } catch {
+  }
+}
+
 async function setVoltage() {
-  await postJSON("/api/voltage", {voltage_v: Number(document.getElementById("setV").value)});
+  await postJSON(appPath("api/voltage"), {voltage_v: Number(document.getElementById("setV").value)});
 }
 
 async function setCurrent() {
-  await postJSON("/api/current", {current_a: Number(document.getElementById("setA").value)});
+  await postJSON(appPath("api/current"), {current_a: Number(document.getElementById("setA").value)});
 }
 
 async function setOutput(on) {
-  await postJSON("/api/output", {on});
+  await postJSON(appPath("api/output"), {on});
 }
 
+refreshStatus();
 connectWS();
 """
     return page("KIKUSUI HV Controller", body, script)

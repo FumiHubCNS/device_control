@@ -211,9 +211,52 @@ class Mdo3034:
         self.write(f"DATa:STARt {start}")
         self.write(f"DATa:STOP {stop}")
 
+    def record_length(self) -> int | None:
+        for command in ("HORizontal:RECOrdlength?", "HORizontal:RECOrdlength:ACTual?"):
+            value = self._query_float_optional(command)
+            if value is not None:
+                return max(1, int(value))
+        return None
+
+    def get_waveform_point_info(self, channel: int) -> dict:
+        self._validate_channel(channel)
+        self.write(f"DATa:SOUrce CH{channel}")
+        record_length = self.record_length()
+        if record_length is not None:
+            self.setup_ascii_waveform_transfer(start=1, stop=record_length)
+        return {
+            "point_offset": float(self.query("WFMOutpre:PT_Off?")),
+            "nr_points": self._query_float_optional("WFMOutpre:NR_Pt?"),
+            "record_length": record_length,
+        }
+
+    def trigger_window_bounds(
+        self,
+        channel: int,
+        *,
+        pretrigger_points: int,
+        posttrigger_points: int,
+    ) -> tuple[int, int, dict]:
+        info = self.get_waveform_point_info(channel)
+        trigger_zero_based = max(0, round(info["point_offset"]))
+        start_zero_based = max(0, trigger_zero_based - pretrigger_points)
+        stop_zero_based = trigger_zero_based + posttrigger_points
+        if info["nr_points"] is not None:
+            stop_zero_based = min(stop_zero_based, max(0, int(info["nr_points"]) - 1))
+        start = start_zero_based + 1
+        stop = max(start, stop_zero_based + 1)
+        return start, stop, info
+
     def arm_single(self) -> None:
         self.write("ACQuire:STOPAfter SEQuence")
         self.write("ACQuire:STATE RUN")
+
+    def resume_continuous(self) -> None:
+        self.write("ACQuire:STOPAfter RUNSTop")
+        self.write("ACQuire:STATE RUN")
+
+    def reset_stop_after(self) -> None:
+        self.write("ACQuire:STOPAfter RUNSTop")
 
     def wait_for_acquisition_complete(
         self,
@@ -222,18 +265,25 @@ class Mdo3034:
         poll_interval_s: float = 0.1,
     ) -> None:
         started_at = time.time()
+        last_state = None
         while True:
             state = self.query("ACQuire:STATE?").strip()
+            last_state = state
             if state in {"0", "OFF", "STOP"}:
                 return
             if time.time() - started_at > timeout_s:
-                raise TimeoutError("MDO3034 acquisition timed out")
+                trigger_state = self._query_optional("TRIGger:STATE?")
+                raise TimeoutError(
+                    "MDO3034 acquisition timed out "
+                    f"(last acquisition state={last_state!r}, trigger state={trigger_state!r}). "
+                    "If no trigger is expected, disable Single to read the current waveform."
+                )
             time.sleep(poll_interval_s)
 
     def read_waveform(self, channel: int, *, start: int = 1, stop: int = 10000) -> Waveform:
         self._validate_channel(channel)
-        self.setup_ascii_waveform_transfer(start=start, stop=stop)
         self.write(f"DATa:SOUrce CH{channel}")
+        self.setup_ascii_waveform_transfer(start=start, stop=stop)
 
         xincr = float(self.query("WFMOutpre:XINcr?"))
         xzero = float(self.query("WFMOutpre:XZEro?"))
@@ -245,7 +295,7 @@ class Mdo3034:
 
         raw = self.query("CURVe?")
         raw_values = np.fromstring(raw.replace("\n", ""), sep=",", dtype=np.float64)
-        indices = np.arange(raw_values.size, dtype=np.float64)
+        indices = np.arange(start - 1, start - 1 + raw_values.size, dtype=np.float64)
         time_s = xzero + (indices - pt_off) * xincr
         voltage_v = (raw_values - yoff) * ymult + yzero
         return Waveform(
@@ -262,8 +312,31 @@ class Mdo3034:
                 "nr_points": nr_pt,
                 "start": start,
                 "stop": stop,
+                "trigger_point": pt_off + 1,
             },
         )
+
+    def read_waveform_around_trigger(
+        self,
+        channel: int,
+        *,
+        pretrigger_points: int = 1000,
+        posttrigger_points: int = 1000,
+    ) -> Waveform:
+        start, stop, info = self.trigger_window_bounds(
+            channel,
+            pretrigger_points=pretrigger_points,
+            posttrigger_points=posttrigger_points,
+        )
+        waveform = self.read_waveform(channel, start=start, stop=stop)
+        waveform.preamble["trigger_window"] = {
+            "requested_pretrigger_points": pretrigger_points,
+            "requested_posttrigger_points": posttrigger_points,
+            "actual_start": start,
+            "actual_stop": stop,
+            "point_info": info,
+        }
+        return waveform
 
     def acquire_waveforms(
         self,
@@ -273,10 +346,27 @@ class Mdo3034:
         stop: int = 10000,
         single: bool = True,
         timeout_s: float = 30.0,
+        trigger_window: bool = False,
+        pretrigger_points: int = 1000,
+        posttrigger_points: int = 1000,
     ) -> list[Waveform]:
         if single:
             self.arm_single()
-            self.wait_for_acquisition_complete(timeout_s=timeout_s)
+            try:
+                self.wait_for_acquisition_complete(timeout_s=timeout_s)
+            finally:
+                self.reset_stop_after()
+        else:
+            self.resume_continuous()
+        if trigger_window:
+            return [
+                self.read_waveform_around_trigger(
+                    channel,
+                    pretrigger_points=pretrigger_points,
+                    posttrigger_points=posttrigger_points,
+                )
+                for channel in channels
+            ]
         return [self.read_waveform(channel, start=start, stop=stop) for channel in channels]
 
 

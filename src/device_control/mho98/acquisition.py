@@ -162,7 +162,10 @@ class RigolScope:
             preamble["source_actual"] = actual_source
 
             self._write(":WAVeform:DATA?")
-            raw = self.client.read_raw()
+            try:
+                raw = self.client.read_raw()
+            except Exception as exc:
+                raise RuntimeError(f"Failed reading :WAVeform:DATA? for CH{ch}: {exc}") from exc
             payload = extract_definite_block_payload(raw)
             data = np.frombuffer(payload, dtype=np.uint8).astype(np.float64)
 

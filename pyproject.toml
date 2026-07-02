@@ -29,7 +29,10 @@ device-control-scope-daq = "device_control.mho98.cli:main"
 device-control-scope-web = "device_control.mho98.web:main"
 device-control-afg1062 = "device_control.tektronix.afg1062.cli:main"
 device-control-afg1062-web = "device_control.tektronix.afg1062.web:main"
+device-control-mdo3034 = "device_control.tektronix.mdo3034.cli:main"
 device-control-mdo3034-web = "device_control.tektronix.mdo3034.web:main"
+device-control-list-usb = "device_control.util.usb:main"
+device-control-scpi-query = "device_control.util.scpi_query:main"
 
 [build-system]
 requires = ["uv_build>=0.9.9,<0.10.0"]

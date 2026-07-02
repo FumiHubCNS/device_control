@@ -45,6 +45,9 @@ class AcquireRequest(BaseModel):
     channels: list[int] = Field(default_factory=lambda: [1, 2, 3, 4])
     start: int = Field(default=1, ge=1)
     stop: int = Field(default=10000, ge=1)
+    trigger_window: bool = False
+    pretrigger_points: int = Field(default=1000, ge=0)
+    posttrigger_points: int = Field(default=1000, ge=0)
     single: bool = True
     timeout_s: float = Field(default=30.0, gt=0)
     save: bool = False
@@ -90,6 +93,8 @@ def _html(default_ip: str | None, default_resource: str | None) -> str:
         <label><input id="socket" type="checkbox" /> Socket</label>
         <label for="socketPort">Port</label>
         <input id="socketPort" type="number" min="1" max="65535" value="4000" />
+        <label for="connectTimeoutMs">VISA timeout [ms]</label>
+        <input id="connectTimeoutMs" type="number" min="1000" max="120000" step="1000" value="60000" />
         <button class="primary" onclick="connectScope()">Connect</button>
         <button onclick="disconnectScope()">Disconnect</button>
         <button onclick="refreshConfig()">Refresh</button>
@@ -126,10 +131,15 @@ def _html(default_ip: str | None, default_resource: str | None) -> str:
         <label for="start">Start</label>
         <input id="start" type="number" min="1" value="1" />
         <label for="stop">Stop</label>
-        <input id="stop" type="number" min="1" value="10000" />
+        <input id="stop" type="number" min="1" value="2000" />
+        <label><input id="triggerWindow" type="checkbox" onchange="updateAcquireMode()" /> Trigger window</label>
+        <label for="pretriggerPoints">Pre</label>
+        <input id="pretriggerPoints" type="number" min="0" step="1" value="1000" />
+        <label for="posttriggerPoints">Post</label>
+        <input id="posttriggerPoints" type="number" min="0" step="1" value="1000" />
         <label for="timeout">Timeout [s]</label>
-        <input id="timeout" type="number" min="0.1" step="0.1" value="30" />
-        <label><input id="single" type="checkbox" checked /> Single</label>
+        <input id="timeout" type="number" min="0.1" step="0.1" value="60" />
+        <label><input id="single" type="checkbox" /> Single</label>
         <label><input id="save" type="checkbox" /> Save CSV</label>
         <label for="saveDir">Dir</label>
         <input id="saveDir" value="." />
@@ -245,6 +255,7 @@ async function connectScope() {
       ip: resource ? null : (ip || null),
       socket: document.getElementById("socket").checked,
       socket_port: Number(document.getElementById("socketPort").value),
+      timeout_ms: Number(document.getElementById("connectTimeoutMs").value),
     });
     renderConfig(data);
   } catch (err) {
@@ -294,19 +305,34 @@ function parseChannels(value) {
   return value.split(/[ ,]+/).filter(Boolean).map(v => Number(v));
 }
 
+function updateAcquireMode() {
+  const enabled = document.getElementById("triggerWindow").checked;
+  document.getElementById("start").disabled = enabled;
+  document.getElementById("stop").disabled = enabled;
+  document.getElementById("pretriggerPoints").disabled = !enabled;
+  document.getElementById("posttriggerPoints").disabled = !enabled;
+}
+
 async function acquire() {
   const button = document.getElementById("acquireButton");
   button.disabled = true;
   try {
-    const data = await postJSON("/api/acquire", {
+    const triggerWindow = document.getElementById("triggerWindow").checked;
+    const payload = {
       channels: parseChannels(document.getElementById("acqChannels").value),
-      start: Number(document.getElementById("start").value),
-      stop: Number(document.getElementById("stop").value),
+      trigger_window: triggerWindow,
+      pretrigger_points: Number(document.getElementById("pretriggerPoints").value),
+      posttrigger_points: Number(document.getElementById("posttriggerPoints").value),
       timeout_s: Number(document.getElementById("timeout").value),
       single: document.getElementById("single").checked,
       save: document.getElementById("save").checked,
       save_directory: document.getElementById("saveDir").value,
-    });
+    };
+    if (!triggerWindow) {
+      payload.start = Number(document.getElementById("start").value);
+      payload.stop = Number(document.getElementById("stop").value);
+    }
+    const data = await postJSON("/api/acquire", payload);
     latestWaveforms = data.waveforms || [];
     drawWaveforms();
     setStatus(data);
@@ -382,6 +408,7 @@ function drawWaveforms() {
 }
 
 renderChannels();
+updateAcquireMode();
 drawWaveforms();
 refreshConfig();
 """
@@ -472,7 +499,7 @@ def create_app(default_ip: str | None = None, default_resource: str | None = Non
 
     def acquire_sync(req: AcquireRequest) -> dict:
         with state.lock:
-            if req.stop < req.start:
+            if not req.trigger_window and req.stop < req.start:
                 raise RuntimeError("stop must be greater than or equal to start")
             scope = require_scope()
             waveforms = scope.acquire_waveforms(
@@ -481,6 +508,9 @@ def create_app(default_ip: str | None = None, default_resource: str | None = Non
                 stop=req.stop,
                 single=req.single,
                 timeout_s=req.timeout_s,
+                trigger_window=req.trigger_window,
+                pretrigger_points=req.pretrigger_points,
+                posttrigger_points=req.posttrigger_points,
             )
             csv_path = None
             if req.save:
@@ -491,6 +521,27 @@ def create_app(default_ip: str | None = None, default_resource: str | None = Non
             return {
                 "status": state.status(),
                 "waveforms": [waveform.to_jsonable() for waveform in waveforms],
+                "acquire": {
+                    "trigger_window": req.trigger_window,
+                    "requested_start": req.start if not req.trigger_window else None,
+                    "requested_stop": req.stop if not req.trigger_window else None,
+                    "requested_pretrigger_points": req.pretrigger_points
+                    if req.trigger_window
+                    else None,
+                    "requested_posttrigger_points": req.posttrigger_points
+                    if req.trigger_window
+                    else None,
+                    "actual_ranges": [
+                        {
+                            "channel": waveform.channel,
+                            "start": waveform.preamble.get("start"),
+                            "stop": waveform.preamble.get("stop"),
+                            "trigger_point": waveform.preamble.get("trigger_point"),
+                            "trigger_window": waveform.preamble.get("trigger_window"),
+                        }
+                        for waveform in waveforms
+                    ],
+                },
                 "csv": str(csv_path) if csv_path else None,
             }
 

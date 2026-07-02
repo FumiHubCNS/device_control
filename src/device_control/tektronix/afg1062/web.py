@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from device_control.protocol import decode_escape_sequences
 from device_control.webui import page
 
 from .driver import Afg1062
@@ -16,9 +17,11 @@ from .driver import Afg1062
 
 class ConnectRequest(BaseModel):
     resource: str | None = None
+    usbtmc: str | None = None
     ip: str | None = None
     backend: str = "@py"
     timeout_ms: int = Field(default=10000, ge=1000, le=120000)
+    write_termination: str = "\\n"
 
 
 class SetChannelRequest(BaseModel):
@@ -49,7 +52,12 @@ class AfgWebState:
         }
 
 
-def _html(default_resource: str | None, default_ip: str | None) -> str:
+def _html(
+    default_resource: str | None,
+    default_usbtmc: str | None,
+    default_ip: str | None,
+    default_write_termination: str,
+) -> str:
     body = f"""
     <header>
       <h1>Tektronix AFG1062</h1>
@@ -64,10 +72,14 @@ def _html(default_resource: str | None, default_ip: str | None) -> str:
       <div class="row">
         <label for="resource">VISA resource</label>
         <input id="resource" value="{default_resource or ''}" placeholder="USB0::...::INSTR" />
+        <label for="usbtmc">USB-TMC device</label>
+        <input id="usbtmc" value="{default_usbtmc or ''}" placeholder="/dev/usbtmc0" />
         <label for="ip">IP</label>
         <input id="ip" value="{default_ip or ''}" />
         <label for="backend">Backend</label>
         <input id="backend" value="@py" />
+        <label for="writeTermination">Write termination</label>
+        <input id="writeTermination" value="{default_write_termination}" />
         <button class="primary" onclick="connectDevice()">Connect</button>
         <button onclick="disconnectDevice()">Disconnect</button>
         <button onclick="refreshSettings()">Refresh</button>
@@ -88,7 +100,14 @@ def _html(default_resource: str | None, default_ip: str | None) -> str:
     </section>
     """
     script = """
-const waveforms = ["SIN", "SQU", "RAMP", "PULS", "NOIS", "DC", "USER"];
+const waveforms = [
+  ["SIN", "Sine"],
+  ["SQU", "Square"],
+  ["RAMP", "Ramp"],
+  ["PULS", "Pulse"],
+  ["PRN", "Noise"],
+  ["DC", "DC"],
+];
 
 function setStatus(data) {
   const status = data.status || data;
@@ -117,14 +136,14 @@ async function getJSON(url) {
 
 function renderChannel(channel, settings = {}) {
   const root = document.getElementById(`ch${channel}`);
-  const waveform = settings.waveform || "SIN";
+  const waveform = settings.waveform === "PRN" ? "PRN" : (settings.waveform || "SIN");
   root.innerHTML = `
     <h2>CH${channel}</h2>
     <div class="row">
       <label><input id="ch${channel}_output" type="checkbox" ${settings.output ? "checked" : ""} /> Output</label>
       <label>Waveform</label>
       <select id="ch${channel}_waveform">
-        ${waveforms.map(w => `<option value="${w}" ${w === waveform ? "selected" : ""}>${w}</option>`).join("")}
+        ${waveforms.map(([value, label]) => `<option value="${value}" ${value === waveform ? "selected" : ""}>${label}</option>`).join("")}
       </select>
     </div>
     <div class="row">
@@ -171,13 +190,17 @@ async function refreshSettings() {
 async function connectDevice() {
   try {
     const resource = document.getElementById("resource").value.trim();
+    const usbtmc = document.getElementById("usbtmc").value.trim();
     const ip = document.getElementById("ip").value.trim();
     const payload = {
-      resource: resource || null,
-      ip: resource ? null : (ip || null),
+      resource: usbtmc ? null : (resource || null),
+      usbtmc: usbtmc || null,
+      ip: (resource || usbtmc) ? null : (ip || null),
       backend: document.getElementById("backend").value.trim() || "@py",
+      write_termination: document.getElementById("writeTermination").value || "\\\\n",
     };
     renderSettings(await postJSON("/api/connect", payload));
+    await refreshSettings();
   } catch (err) {
     alert(String(err));
   }
@@ -193,17 +216,22 @@ async function disconnectDevice() {
 
 async function applyChannel(channel) {
   try {
+    const waveform = document.getElementById(`ch${channel}_waveform`).value;
     const payload = {
       channel,
       output: document.getElementById(`ch${channel}_output`).checked,
-      waveform: document.getElementById(`ch${channel}_waveform`).value,
-      frequency_hz: Number(document.getElementById(`ch${channel}_frequency`).value),
-      amplitude_vpp: Number(document.getElementById(`ch${channel}_amplitude`).value),
+      waveform,
       offset_v: Number(document.getElementById(`ch${channel}_offset`).value),
       phase: Number(document.getElementById(`ch${channel}_phase`).value),
       phase_unit: "DEG",
-      duty_cycle_percent: Number(document.getElementById(`ch${channel}_duty`).value),
     };
+    if (waveform !== "DC") {
+      payload.frequency_hz = Number(document.getElementById(`ch${channel}_frequency`).value);
+      payload.amplitude_vpp = Number(document.getElementById(`ch${channel}_amplitude`).value);
+    }
+    if (waveform === "PULS") {
+      payload.duty_cycle_percent = Number(document.getElementById(`ch${channel}_duty`).value);
+    }
     renderSettings(await postJSON("/api/channel", payload));
   } catch (err) {
     alert(String(err));
@@ -217,7 +245,13 @@ refreshSettings();
     return page("Tektronix AFG1062", body, script)
 
 
-def create_app(default_resource: str | None = None, default_ip: str | None = None) -> FastAPI:
+def create_app(
+    default_resource: str | None = None,
+    default_usbtmc: str | None = None,
+    default_ip: str | None = None,
+    default_write_termination: str = "\\n",
+    verbose: bool = False,
+) -> FastAPI:
     app = FastAPI(title="Tektronix AFG1062")
     state = AfgWebState()
 
@@ -237,21 +271,23 @@ def create_app(default_resource: str | None = None, default_ip: str | None = Non
         with state.lock:
             if state.afg is not None:
                 state.afg.close()
-            if req.resource is None and req.ip is None:
-                raise RuntimeError("VISA resource or IP is required")
+            if req.resource is None and req.usbtmc is None and req.ip is None:
+                raise RuntimeError("VISA resource, USB-TMC device, or IP is required")
             afg = Afg1062(
                 resource=req.resource,
+                usbtmc=req.usbtmc,
                 ip=req.ip,
                 backend=req.backend,
                 timeout_ms=req.timeout_ms,
+                write_termination=decode_escape_sequences(req.write_termination),
+                verbose=verbose,
             )
             afg.connect()
             state.afg = afg
             state.idn = afg.get_idn()
             state.connected = True
             state.last_error = None
-            channels = [item.asdict() for item in afg.get_all_settings()]
-            return {"status": state.status(), "channels": channels}
+            return {"status": state.status(), "channels": []}
 
     def disconnect_sync() -> dict:
         with state.lock:
@@ -284,7 +320,7 @@ def create_app(default_resource: str | None = None, default_ip: str | None = Non
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return _html(default_resource, default_ip)
+        return _html(default_resource, default_usbtmc, default_ip, default_write_termination)
 
     @app.get("/api/settings")
     async def settings() -> dict:
@@ -324,16 +360,25 @@ def create_app(default_resource: str | None = None, default_ip: str | None = Non
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Tektronix AFG1062 WebUI")
     parser.add_argument("--resource", help="Default VISA resource")
+    parser.add_argument("--usbtmc", help="Default Linux USB-TMC device")
     parser.add_argument("--ip", help="Default instrument IP")
+    parser.add_argument("--write-termination", default="\\n", help=r"SCPI write termination, e.g. \n or \r\n")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8083)
+    parser.add_argument("--verbose", action="store_true", help="Print SCPI traffic to the server console")
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args(argv)
 
     import uvicorn
 
     uvicorn.run(
-        create_app(default_resource=args.resource, default_ip=args.ip),
+        create_app(
+            default_resource=args.resource,
+            default_usbtmc=args.usbtmc,
+            default_ip=args.ip,
+            default_write_termination=args.write_termination,
+            verbose=args.verbose,
+        ),
         host=args.host,
         port=args.port,
         reload=args.reload,

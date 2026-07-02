@@ -1,0 +1,33 @@
+[project]
+name = "device-control"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "FumiHubCNS", email = "fendo@cns.s.u-tokyo.ac.jp" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "h5py>=3.12",
+    "numpy>=2.0",
+    "pydantic>=2.0",
+    "pyserial>=3.5",
+    "pyvisa>=1.14",
+    "pyvisa-py>=0.7",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+viewer = [
+    "pyqtgraph>=0.13",
+]
+
+[project.scripts]
+device-control-kikusui-web = "device_control.kikusui.web:main"
+device-control-scope-daq = "device_control.mho98.cli:main"
+device-control-scope-web = "device_control.mho98.web:main"
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"

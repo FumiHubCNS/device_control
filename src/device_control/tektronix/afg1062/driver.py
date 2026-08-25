@@ -25,6 +25,19 @@ WAVEFORM_ALIASES = {
     "DC": "DC",
 }
 
+WAVEFORM_READBACK_ALIASES = {
+    "SIN": "SIN",
+    "SINUSOID": "SIN",
+    "SQU": "SQU",
+    "SQUARE": "SQU",
+    "RAMP": "RAMP",
+    "PULS": "PULS",
+    "PULSE": "PULS",
+    "PRN": "PRN",
+    "PRNOISE": "PRN",
+    "DC": "DC",
+}
+
 
 @dataclass
 class ChannelSettings:
@@ -110,12 +123,10 @@ class Afg1062:
         self.write("*CLS")
 
     def next_error(self) -> str | None:
-        for command in ("SYSTem:ERRor?", "SYSTem:ERRor:NEXT?"):
-            try:
-                return self.query(command)
-            except Exception:
-                continue
-        return None
+        try:
+            return self.query("SYSTEM:ERROR?")
+        except Exception:
+            return None
 
     def raise_on_error(self, context: str) -> None:
         error = self.next_error()
@@ -127,6 +138,11 @@ class Afg1062:
     @staticmethod
     def normalize_waveform(waveform: str) -> str:
         return WAVEFORM_ALIASES.get(waveform.strip().upper(), waveform)
+
+    @staticmethod
+    def normalize_waveform_readback(waveform: str) -> str:
+        cleaned = waveform.strip().strip('"')
+        return WAVEFORM_READBACK_ALIASES.get(cleaned.upper(), cleaned)
 
     @staticmethod
     def _validate_channel(channel: int) -> None:
@@ -145,7 +161,9 @@ class Afg1062:
         self._validate_channel(channel)
         settings = ChannelSettings(channel=channel)
         settings.output = self._parse_bool(self.query(f"OUTPut{channel}:STATe?"))
-        settings.waveform = self._clean(self.query(f"SOURce{channel}:FUNCtion:SHAPe?"))
+        settings.waveform = self.normalize_waveform_readback(
+            self.query(f"SOURce{channel}:FUNCtion:SHAPe?")
+        )
         settings.frequency_hz = float(self.query(f"SOURce{channel}:FREQuency:FIXed?"))
         settings.amplitude_vpp = float(self.query(f"SOURce{channel}:VOLTage:AMPLitude?"))
         settings.offset_v = float(self.query(f"SOURce{channel}:VOLTage:OFFSet?"))

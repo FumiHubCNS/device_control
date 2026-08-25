@@ -100,6 +100,12 @@ def _html(
     </section>
     """
     script = """
+const appPath = window.location.pathname.replace(/\\/$/, "");
+
+function apiPath(path) {
+  return `${appPath}/${path}`;
+}
+
 const waveforms = [
   ["SIN", "Sine"],
   ["SQU", "Square"],
@@ -136,7 +142,7 @@ async function getJSON(url) {
 
 function renderChannel(channel, settings = {}) {
   const root = document.getElementById(`ch${channel}`);
-  const waveform = settings.waveform === "PRN" ? "PRN" : (settings.waveform || "SIN");
+  const waveform = settings.waveform || "SIN";
   root.innerHTML = `
     <h2>CH${channel}</h2>
     <div class="row">
@@ -181,7 +187,7 @@ function renderSettings(data) {
 
 async function refreshSettings() {
   try {
-    renderSettings(await getJSON("/api/settings"));
+    renderSettings(await getJSON(apiPath("api/settings")));
   } catch (err) {
     document.getElementById("json").textContent = String(err);
   }
@@ -199,7 +205,7 @@ async function connectDevice() {
       backend: document.getElementById("backend").value.trim() || "@py",
       write_termination: document.getElementById("writeTermination").value || "\\\\n",
     };
-    renderSettings(await postJSON("/api/connect", payload));
+    renderSettings(await postJSON(apiPath("api/connect"), payload));
     await refreshSettings();
   } catch (err) {
     alert(String(err));
@@ -208,7 +214,7 @@ async function connectDevice() {
 
 async function disconnectDevice() {
   try {
-    setStatus(await postJSON("/api/disconnect", {}));
+    setStatus(await postJSON(apiPath("api/disconnect"), {}));
   } catch (err) {
     alert(String(err));
   }
@@ -232,7 +238,7 @@ async function applyChannel(channel) {
     if (waveform === "PULS") {
       payload.duty_cycle_percent = Number(document.getElementById(`ch${channel}_duty`).value);
     }
-    renderSettings(await postJSON("/api/channel", payload));
+    renderSettings(await postJSON(apiPath("api/channel"), payload));
   } catch (err) {
     alert(String(err));
   }

@@ -158,7 +158,12 @@ def _html(default_ip: str | None, default_resource: str | None) -> str:
     </section>
     """
     script = """
+const appPath = window.location.pathname.replace(/\\/$/, "");
 let latestWaveforms = [];
+
+function apiPath(path) {
+  return `${appPath}/${path}`;
+}
 
 function setStatus(data) {
   const status = data.status || data;
@@ -231,6 +236,7 @@ function renderChannels(configs = []) {
 function renderConfig(data) {
   setStatus(data);
   renderChannels(data.channels || []);
+  setAcquireChannelsFromDisplayed(data.channels || []);
   const trig = data.trigger || {};
   if (trig.source) document.getElementById("trigSource").value = trig.source;
   if (trig.slope) document.getElementById("trigSlope").value = trig.slope;
@@ -240,7 +246,7 @@ function renderConfig(data) {
 
 async function refreshConfig() {
   try {
-    renderConfig(await getJSON("/api/config"));
+    renderConfig(await getJSON(apiPath("api/config")));
   } catch (err) {
     document.getElementById("json").textContent = String(err);
   }
@@ -250,7 +256,7 @@ async function connectScope() {
   try {
     const resource = document.getElementById("resource").value.trim();
     const ip = document.getElementById("ip").value.trim();
-    const data = await postJSON("/api/connect", {
+    const data = await postJSON(apiPath("api/connect"), {
       resource: resource || null,
       ip: resource ? null : (ip || null),
       socket: document.getElementById("socket").checked,
@@ -265,7 +271,7 @@ async function connectScope() {
 
 async function disconnectScope() {
   try {
-    setStatus(await postJSON("/api/disconnect", {}));
+    setStatus(await postJSON(apiPath("api/disconnect"), {}));
   } catch (err) {
     alert(String(err));
   }
@@ -274,7 +280,7 @@ async function disconnectScope() {
 async function applyChannel(channel) {
   try {
     const bandwidth = document.getElementById(`ch${channel}_bandwidth`).value.trim();
-    renderConfig(await postJSON("/api/channel", {
+    renderConfig(await postJSON(apiPath("api/channel"), {
       channel,
       display: document.getElementById(`ch${channel}_display`).checked,
       scale_v: Number(document.getElementById(`ch${channel}_scale`).value),
@@ -290,7 +296,7 @@ async function applyChannel(channel) {
 
 async function applyTrigger() {
   try {
-    renderConfig(await postJSON("/api/trigger", {
+    renderConfig(await postJSON(apiPath("api/trigger"), {
       source: document.getElementById("trigSource").value,
       slope: document.getElementById("trigSlope").value,
       level_v: Number(document.getElementById("trigLevel").value),
@@ -303,6 +309,16 @@ async function applyTrigger() {
 
 function parseChannels(value) {
   return value.split(/[ ,]+/).filter(Boolean).map(v => Number(v));
+}
+
+function setAcquireChannelsFromDisplayed(configs) {
+  const input = document.getElementById("acqChannels");
+  const current = input.value.trim();
+  if (current && current !== "1 2 3 4") return;
+  const displayed = configs
+    .filter(item => item.display)
+    .map(item => item.channel);
+  if (displayed.length > 0) input.value = displayed.join(" ");
 }
 
 function updateAcquireMode() {
@@ -332,7 +348,7 @@ async function acquire() {
       payload.start = Number(document.getElementById("start").value);
       payload.stop = Number(document.getElementById("stop").value);
     }
-    const data = await postJSON("/api/acquire", payload);
+    const data = await postJSON(apiPath("api/acquire"), payload);
     latestWaveforms = data.waveforms || [];
     drawWaveforms();
     setStatus(data);
@@ -415,7 +431,11 @@ refreshConfig();
     return page("Tektronix MDO3034", body, script)
 
 
-def create_app(default_ip: str | None = None, default_resource: str | None = None) -> FastAPI:
+def create_app(
+    default_ip: str | None = None,
+    default_resource: str | None = None,
+    verbose: bool = False,
+) -> FastAPI:
     app = FastAPI(title="Tektronix MDO3034")
     state = MdoWebState()
 
@@ -450,6 +470,7 @@ def create_app(default_ip: str | None = None, default_resource: str | None = Non
                 socket_port=req.socket_port,
                 backend=req.backend,
                 timeout_ms=req.timeout_ms,
+                verbose=verbose,
             )
             scope.connect()
             state.scope = scope
@@ -610,13 +631,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ip", help="Default oscilloscope IP")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8084)
+    parser.add_argument("--verbose", action="store_true", help="Print SCPI traffic to the server console")
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args(argv)
 
     import uvicorn
 
     uvicorn.run(
-        create_app(default_ip=args.ip, default_resource=args.resource),
+        create_app(default_ip=args.ip, default_resource=args.resource, verbose=args.verbose),
         host=args.host,
         port=args.port,
         reload=args.reload,

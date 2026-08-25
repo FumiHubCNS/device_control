@@ -143,6 +143,7 @@ class UsbtmcScpiClient:
         write_termination: str = "\n",
         read_chunk_size: int = 65536,
         poll_interval_s: float = 0.01,
+        response_idle_s: float = 0.05,
         verbose: bool = False,
     ) -> None:
         self.device = device
@@ -150,6 +151,7 @@ class UsbtmcScpiClient:
         self.write_termination = write_termination
         self.read_chunk_size = read_chunk_size
         self.poll_interval_s = poll_interval_s
+        self.response_idle_s = response_idle_s
         self.verbose = verbose
         self._fd: int | None = None
 
@@ -203,8 +205,12 @@ class UsbtmcScpiClient:
 
     def read_raw(self) -> bytes:
         chunks = []
+        last_chunk_at = None
         deadline = time.monotonic() + self.timeout_ms / 1000
         while True:
+            now = time.monotonic()
+            if chunks and last_chunk_at is not None and now - last_chunk_at >= self.response_idle_s:
+                return b"".join(chunks)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if chunks:
@@ -226,5 +232,6 @@ class UsbtmcScpiClient:
                 continue
 
             chunks.append(chunk)
+            last_chunk_at = time.monotonic()
             if chunk.endswith(b"\n"):
                 return b"".join(chunks)
